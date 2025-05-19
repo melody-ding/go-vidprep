@@ -1,1 +1,1 @@
-# webdataset-go
+# go-vidprep
