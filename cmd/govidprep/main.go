@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"runtime"
+	"time"
 
 	"github.com/melody-ding/go-vidprep/internal/processor"
 	"github.com/melody-ding/go-vidprep/internal/tar_reader"
@@ -13,6 +15,7 @@ func main() {
 	outputDir := flag.String("out", "output", "Directory to save extracted frames")
 	fps := flag.Int("fps", 8, "Target frames per second")
 	size := flag.String("size", "256x256", "Resize videos to this resolution (e.g. 256x256)")
+	workers := flag.Int("workers", runtime.NumCPU(), "Number of parallel workers (default: number of CPU cores)")
 	flag.Parse()
 
 	clips, err := tar_reader.ExtractClipsFromTar(*tarPath)
@@ -21,10 +24,12 @@ func main() {
 		return
 	}
 
-	for _, clip := range clips {
-		fmt.Printf("Processing clip: %s\n", clip.Key)
-		if err := processor.ProcessClip(clip, *outputDir, *fps, *size); err != nil {
-			fmt.Printf("Error processing %s: %v\n", clip.Key, err)
-		}
+	fmt.Printf("Processing %d clips using %d workers...\n", len(clips), *workers)
+	startTime := time.Now()
+	if err := processor.ProcessClips(clips, *outputDir, *fps, *size, *workers); err != nil {
+		fmt.Printf("Error processing clips: %v\n", err)
+		return
 	}
+	duration := time.Since(startTime)
+	fmt.Printf("Processing completed successfully in %v!\n", duration)
 }

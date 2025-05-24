@@ -3,12 +3,13 @@ package processor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/melody-ding/go-vidprep/internal/types"
+	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
 
 // ProcessClip extracts frames from a video clip using ffmpeg
@@ -44,12 +45,61 @@ func ProcessClip(clip types.Clip, outputDir string, fps int, size string) error 
 		ScaleTransform{Width: width, Height: height},
 	}
 
-	cmd := exec.Command("ffmpeg",
-		"-i", tempVideoPath,
-		"-vf", ComposeTransforms(transforms...),
-		filepath.Join(outPath, "frame_%03d.jpg"),
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	// Use ffmpeg-go to process the video
+	err = ffmpeg.Input(tempVideoPath).
+		Output(filepath.Join(outPath, "frame_%03d.jpg"),
+			ffmpeg.KwArgs{
+				"vf": ComposeTransforms(transforms...),
+			}).
+		OverWriteOutput().
+		Run()
+
+	return err
+}
+
+// ProcessClips processes multiple video clips in parallel
+func ProcessClips(clips []types.Clip, outputDir string, fps int, size string, numWorkers int) error {
+	if numWorkers <= 0 {
+		numWorkers = 4 // Default number of workers
+	}
+
+	// Create channels for work distribution and error collection
+	jobs := make(chan types.Clip, len(clips))
+	errors := make(chan error, len(clips))
+	var wg sync.WaitGroup
+
+	// Start worker goroutines
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for clip := range jobs {
+				if err := ProcessClip(clip, outputDir, fps, size); err != nil {
+					errors <- fmt.Errorf("error processing %s: %v", clip.Key, err)
+				}
+			}
+		}()
+	}
+
+	// Send jobs to workers
+	for _, clip := range clips {
+		jobs <- clip
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(errors)
+
+	// Collect any errors
+	var errs []error
+	for err := range errors {
+		errs = append(errs, err)
+	}
+
+	// Return combined errors if any occurred
+	if len(errs) > 0 {
+		return fmt.Errorf("encountered %d errors: %v", len(errs), errs)
+	}
+	return nil
 }

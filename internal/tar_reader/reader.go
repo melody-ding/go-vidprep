@@ -30,7 +30,8 @@ func ExtractClipsFromTar(tarPath string) ([]types.Clip, error) {
 			return nil, err
 		}
 
-		if !strings.HasSuffix(hdr.Name, ".mp4") {
+		// Skip macOS hidden files and non-mp4 files
+		if strings.HasPrefix(filepath.Base(hdr.Name), "._") || !strings.HasSuffix(hdr.Name, ".mp4") {
 			continue
 		}
 
