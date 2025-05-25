@@ -1,6 +1,15 @@
 # go-vidprep
 
-A Go-based video preprocessing tool that extracts frames from videos in a tar archive. It processes multiple videos in parallel and supports frame rate adjustment, resizing, and consistent frame counts.
+A Go-based video preprocessing tool that extracts frames from videos in a tar archive. It processes multiple videos in parallel and supports frame rate adjustment, resizing, consistent frame counts, and WebDataset sharding.
+
+## Features
+
+- Extract frames from video clips in a tar archive
+- Support for both JPEG and NumPy output formats
+- Consistent frame counts per clip (padding or trimming as needed)
+- Parallel processing with configurable number of workers
+- WebDataset sharding support for distributed training
+- Detailed metadata for each processed clip
 
 ## Installation
 
@@ -16,7 +25,7 @@ go build -o govidprep cmd/govidprep/main.go
 ## Usage
 
 ```bash
-./govidprep [options]
+go-vidprep -tar <input_tar> -out <output_dir> [options]
 ```
 
 ### Options
@@ -28,6 +37,8 @@ go build -o govidprep cmd/govidprep/main.go
 - `-format string`: Output format (jpg, npy) (default "jpg")
 - `-frames int`: Target number of frames per chunk (default 16)
 - `-workers int`: Number of parallel workers (default: number of CPU cores)
+- `-shard-size int`: Number of chunks per WebDataset shard (default 1000)
+- `-shard-dir string`: Output directory for WebDataset shards (optional)
 
 ### Examples
 
@@ -51,19 +62,29 @@ Output in NumPy array format:
 ./govidprep -tar my_videos.tar -format npy
 ```
 
-## Output
+Create WebDataset shards from existing processed chunks:
+```bash
+./govidprep -out processed_frames -shard-dir shards -format jpg
+```
 
-The tool will:
-1. Extract videos from the tar archive
-2. Process each video to extract frames at the specified FPS
-3. Resize frames to the specified dimensions
-4. Split each video into chunks of exactly targetFrames length. Trailing frames may be truncated if they do not fit perfectly into a chunk.
-5. Save frames in the specified format (jpg or npy) in the output directory
-6. Generate metadata for each processed chunk
+## Output Structure
 
-### Output Structure
+### JPEG Format
+```
+output/
+  video1/
+    chunk_00000/
+      frame_001.jpg
+      frame_002.jpg
+      ...
+      metadata.json
+    chunk_00001/
+      ...
+  video2/
+    ...
+```
 
-#### NumPy Format
+### NumPy Format
 ```
 output/
   video1/
@@ -78,37 +99,34 @@ output/
     ...
 ```
 
-#### JPEG Format
-```
-output/
-  video1/
-    chunk_00000/
-      frame_001.jpg
-      frame_002.jpg
-      ...
-      metadata.json
-    chunk_00001/
-      frame_001.jpg
-      frame_002.jpg
-      ...
-      metadata.json
-  video2/
-    chunk_00000/
-      frame_001.jpg
-      frame_002.jpg
-      ...
-      metadata.json
-```
+### WebDataset Sharding
+- Shards are created as tar files containing the specified number of samples
+- Each shard is named `shard_XXXXX.tar` where XXXXX is a zero-padded number
+- Samples within shards maintain their original filenames
+- Sharding is optional and only occurs if `-shard-dir` is specified
 
-### Metadata Format
+### Parameter Relationships
+- `frames`: Number of frames per chunk (e.g., 16 frames per chunk)
+- `fps`: Frame rate for extraction (e.g., 8 frames per second)
+- `shardSize`: Number of chunks per shard (e.g., 1000 chunks per shard)
+- Example: With `frames=16`, `fps=8`, and `shardSize=1000`:
+  - Each chunk contains 16 frames
+  - Each shard contains 1000 chunks
+  - Total frames per shard = 16,000 frames
+  - Total video duration per shard = 16,000 frames ÷ 8 fps = 2,000 seconds
 
-Each chunk has an associated metadata file with the following information:
+## Metadata Format
+
+Each clip's metadata is stored in a JSON file with the following structure:
+
 ```json
 {
   "key": "video1/chunk_00000",
   "fps": 8,
   "frame_count": 16,
   "size": [256, 256],
+  "is_padded": false,
+  "is_trimmed": false,
   "original_fps": 8
 }
 ```
@@ -121,13 +139,25 @@ Each chunk has an associated metadata file with the following information:
 
 ## Important Notes
 
-### Frame Truncation
-- The tool will only save complete chunks of exactly `targetFrames` length
-- Any remaining frames that don't form a complete chunk will be discarded
-- For example, if a video has 50 frames and `targetFrames` is 16:
-  - It will create 3 chunks of 16 frames each (48 frames total)
-  - The remaining 2 frames will be discarded
-- To avoid losing frames, choose a `targetFrames` value that divides evenly into your expected video lengths
+1. Frame Count Consistency:
+   - Each clip will have exactly the target number of frames
+   - Clips shorter than the target will be padded with zeros
+   - Clips longer than the target will be trimmed
+   - Remaining frames that don't form a complete chunk will be discarded
+
+2. WebDataset Sharding:
+   - Shards are created as tar files containing the specified number of samples
+   - Each shard is named `shard_XXXXX.tar` where XXXXX is a zero-padded number
+   - Samples within shards maintain their original filenames
+   - Sharding is optional and only occurs if `-shard-dir` is specified
+
+3. Frame Truncation:
+   - The tool will only save complete chunks of exactly `targetFrames` length
+   - Any remaining frames that don't form a complete chunk will be discarded
+   - For example, if a video has 50 frames and `targetFrames` is 16:
+     - It will create 3 chunks of 16 frames each (48 frames total)
+     - The remaining 2 frames will be discarded
+   - To avoid losing frames, choose a `targetFrames` value that divides evenly into your expected video lengths
 
 ### File Naming
 - Chunk numbers use 5 decimal places (00000-99999)
