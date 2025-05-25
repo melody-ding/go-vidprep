@@ -16,6 +16,7 @@ func main() {
 	fps := flag.Int("fps", 8, "Target frames per second")
 	size := flag.String("size", "256x256", "Resize videos to this resolution (e.g. 256x256)")
 	format := flag.String("format", "jpg", "Output format (jpg, npy)")
+	targetFrames := flag.Int("frames", 16, "Target number of frames per clip (will pad or trim as needed)")
 	workers := flag.Int("workers", runtime.NumCPU(), "Number of parallel workers (default: number of CPU cores)")
 	flag.Parse()
 
@@ -37,7 +38,7 @@ func main() {
 
 	fmt.Printf("Processing %d clips using %d workers...\n", len(clips), *workers)
 	startTime := time.Now()
-	if err := processor.ProcessClips(clips, *outputDir, *fps, *size, outputFormat, *workers); err != nil {
+	if err := processor.ProcessClips(clips, *outputDir, *fps, *size, outputFormat, *targetFrames, *workers); err != nil {
 		fmt.Printf("Error processing clips: %v\n", err)
 		return
 	}

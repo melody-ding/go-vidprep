@@ -1,15 +1,16 @@
 package processor
 
 import (
-	"bytes"
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/melody-ding/go-vidprep/internal/numpy"
 	"github.com/melody-ding/go-vidprep/internal/types"
 	ffmpeg "github.com/u2takey/ffmpeg-go"
 )
@@ -73,93 +74,26 @@ func extractRawFrames(videoPath string, dims Dimensions, fps int) ([]byte, error
 		return nil, fmt.Errorf("error extracting raw frames: %v", err)
 	}
 
-	return os.ReadFile(tempRawPath)
-}
-
-// createNumpyHeader creates a NumPy array header with the given shape for NPY v1.0.
-// This function returns the full header byte slice, including magic string, version,
-// header length, dictionary, and padding.
-func createNumpyHeader(shape []int) ([]byte, error) {
-	// 1. Construct the Python dictionary literal string
-	var shapeStr bytes.Buffer
-	shapeStr.WriteString("{'descr': '<u1', 'fortran_order': False, 'shape': (")
-	for i, s := range shape {
-		shapeStr.WriteString(fmt.Sprintf("%d", s))
-		if i < len(shape)-1 {
-			shapeStr.WriteString(", ")
-		}
-	}
-	shapeStr.WriteString(")}")
-
-	dictBytes := shapeStr.Bytes()
-
-	// 2. Calculate padding for the dictionary string
-	// The total header length (dict string + 10 bytes for magic+version+length prefix)
-	// must be a multiple of 16.
-	// The dict string itself needs to be padded so that (len(dictBytes) + 10) is a multiple of 16.
-	currentHeaderSize := len(dictBytes) + 10 // 10 = len(magic+version) + len(header_len_prefix)
-	padding := (16 - (currentHeaderSize % 16)) % 16
-	if padding == 0 && currentHeaderSize%16 != 0 {
-		// If currentHeaderSize is already a multiple of 16, padding should be 0.
-		// But if currentHeaderSize is 0 (e.g. empty dict), padding should also be 0
-		// This edge case ensures we don't add 16 bytes of padding when none is needed.
-		// For NPY, a non-zero length means padding will always be non-zero if not a multiple of 16.
-		// A common pattern is to ensure total length is *at least* 128 bytes if you want to be flexible.
-		// For v1.0, 16-byte alignment is sufficient.
+	rawData, err := os.ReadFile(tempRawPath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading raw frames: %v", err)
 	}
 
-	// 3. Assemble the full header byte slice
-	var fullHeader bytes.Buffer
-
-	// Magic string and version (NPY v1.0) - 8 bytes
-	fullHeader.Write([]byte{0x93, 'N', 'U', 'M', 'P', 'Y', 0x01, 0x00})
-
-	// Header length (uint16 little-endian) - 2 bytes
-	// This is the length of the *dictionary string plus its padding*.
-	// The total size of the header block (magic+version+length+dict+padding) must be 16-byte aligned.
-	// So the length here is the length of the dictionary string + the padding bytes for it.
-	headerDictWithPaddingLen := uint16(len(dictBytes) + padding)
-	if err := binary.Write(&fullHeader, binary.LittleEndian, headerDictWithPaddingLen); err != nil {
-		return nil, fmt.Errorf("failed to write header dictionary length: %v", err)
-	}
-
-	// Dictionary literal string
-	fullHeader.Write(dictBytes)
-
-	// Padding bytes
-	fullHeader.Write(bytes.Repeat([]byte{' '}, padding))
-
-	return fullHeader.Bytes(), nil
+	return rawData, nil
 }
 
 // saveNumpyArray saves raw frame data as a NumPy array
 func saveNumpyArray(data []byte, dims Dimensions, numFrames int, outputPath string) error {
-	// NPY arrays are usually (frames, height, width, channels)
-	// Channels is 3 for RGB or 1 for grayscale. Assuming 3 channels as per your snippet.
+	// Create the NumPy writer
+	writer, err := numpy.NewWriter(outputPath)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+
+	// Write the data with shape (frames, height, width, channels)
 	shape := []int{numFrames, dims.Height, dims.Width, 3}
-
-	// Create the header bytes
-	headerBytes, err := createNumpyHeader(shape)
-	if err != nil {
-		return fmt.Errorf("error creating numpy header: %v", err)
-	}
-
-	f, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("error creating npy file: %v", err)
-	}
-	defer f.Close()
-
-	// Write the complete header (magic string, version, header length, dictionary, padding)
-	if _, err := f.Write(headerBytes); err != nil {
-		return fmt.Errorf("error writing npy header: %v", err)
-	}
-
-	// Write data
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("error writing npy data: %v", err)
-	}
-	return nil
+	return writer.Write(data, shape)
 }
 
 // saveJPEGFrames saves individual JPEG frames
@@ -178,20 +112,24 @@ func saveJPEGFrames(videoPath string, dims Dimensions, fps int, outputPath strin
 		Run()
 }
 
+// saveMetadata saves clip metadata to a JSON file
+func saveMetadata(metadata types.ClipMetadata, outputPath string) error {
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error marshaling metadata: %v", err)
+	}
+
+	return os.WriteFile(outputPath, data, 0644)
+}
+
 // ProcessClip extracts frames from a video clip using ffmpeg
-func ProcessClip(clip types.Clip, outputDir string, fps int, size string, format OutputFormat) error {
+func ProcessClip(clip types.Clip, outputDir string, fps int, size string, format OutputFormat, targetFrames int) error {
 	// Create temporary video file
 	tempVideoPath := filepath.Join(os.TempDir(), clip.Key+".mp4")
 	if err := os.WriteFile(tempVideoPath, clip.RawData, 0644); err != nil {
 		return err
 	}
 	defer os.Remove(tempVideoPath)
-
-	// Create output directory
-	outPath := filepath.Join(outputDir, clip.Key)
-	if err := os.MkdirAll(outPath, 0755); err != nil {
-		return err
-	}
 
 	// Parse dimensions
 	dims, err := parseDimensions(size)
@@ -202,27 +140,187 @@ func ProcessClip(clip types.Clip, outputDir string, fps int, size string, format
 	// Process based on format
 	switch format {
 	case FormatNPY:
+		// First extract all frames
+		outPath := filepath.Join(outputDir, clip.Key)
+		if err := os.MkdirAll(outPath, 0755); err != nil {
+			return err
+		}
+
 		// Extract raw frames
 		rawData, err := extractRawFrames(tempVideoPath, dims, fps)
 		if err != nil {
 			return err
 		}
 
-		// Calculate number of frames
-		frameSize := dims.Width * dims.Height * 3 // 3 channels for RGB
-		numFrames := len(rawData) / frameSize
+		// Calculate number of frames and chunks
+		frameSize := dims.Width * dims.Height * 3
+		totalFrames := len(rawData) / frameSize
+		numChunks := totalFrames / targetFrames
 
-		// Save as NumPy array
-		return saveNumpyArray(rawData, dims, numFrames, filepath.Join(outPath, "frames.npy"))
+		// Process each chunk
+		for i := 0; i < numChunks; i++ {
+			// Extract chunk data
+			startFrame := i * targetFrames
+			endFrame := (i + 1) * targetFrames
+			chunkData := rawData[startFrame*frameSize : endFrame*frameSize]
+
+			// Save as NumPy array
+			chunkFile := filepath.Join(outPath, fmt.Sprintf("chunk_%05d.npy", i))
+			if err := saveNumpyArray(chunkData, dims, targetFrames, chunkFile); err != nil {
+				return err
+			}
+
+			// Save metadata for this chunk
+			metadata := types.ClipMetadata{
+				Key:         fmt.Sprintf("%s/chunk_%05d", clip.Key, i),
+				FPS:         fps,
+				FrameCount:  targetFrames,
+				Size:        []int{dims.Height, dims.Width},
+				OriginalFPS: fps,
+			}
+			metadataFile := filepath.Join(outPath, fmt.Sprintf("chunk_%05d_metadata.json", i))
+			if err := saveMetadata(metadata, metadataFile); err != nil {
+				return err
+			}
+		}
+
+		// Handle remaining frames if they form a complete chunk
+		remainingFrames := totalFrames % targetFrames
+		if remainingFrames == targetFrames {
+			startFrame := numChunks * targetFrames
+			endFrame := startFrame + targetFrames
+			chunkData := rawData[startFrame*frameSize : endFrame*frameSize]
+
+			chunkFile := filepath.Join(outPath, fmt.Sprintf("chunk_%05d.npy", numChunks))
+			if err := saveNumpyArray(chunkData, dims, targetFrames, chunkFile); err != nil {
+				return err
+			}
+
+			metadata := types.ClipMetadata{
+				Key:         fmt.Sprintf("%s/chunk_%05d", clip.Key, numChunks),
+				FPS:         fps,
+				FrameCount:  targetFrames,
+				Size:        []int{dims.Height, dims.Width},
+				OriginalFPS: fps,
+			}
+			metadataFile := filepath.Join(outPath, fmt.Sprintf("chunk_%05d_metadata.json", numChunks))
+			return saveMetadata(metadata, metadataFile)
+		}
+
+		return nil
 
 	default:
-		// Save as JPEG frames
-		return saveJPEGFrames(tempVideoPath, dims, fps, outPath)
+		// For JPEG format, first extract all frames
+		outPath := filepath.Join(outputDir, clip.Key)
+		if err := os.MkdirAll(outPath, 0755); err != nil {
+			return err
+		}
+
+		// Extract all frames
+		err = ffmpeg.Input(tempVideoPath).
+			Output(filepath.Join(outPath, "frame_%03d.jpg"),
+				ffmpeg.KwArgs{
+					"vf": ComposeTransforms(FPSTransform{FPS: fps}, dims.ScaleTransform()),
+				}).
+			OverWriteOutput().
+			Run()
+		if err != nil {
+			return fmt.Errorf("error extracting frames: %v", err)
+		}
+
+		// Get list of extracted frames
+		files, err := os.ReadDir(outPath)
+		if err != nil {
+			return fmt.Errorf("error reading output directory: %v", err)
+		}
+
+		// Filter for only jpg files and sort them
+		var frameFiles []string
+		for _, file := range files {
+			if !file.IsDir() && strings.HasSuffix(file.Name(), ".jpg") {
+				frameFiles = append(frameFiles, file.Name())
+			}
+		}
+		sort.Strings(frameFiles)
+
+		// Calculate number of complete chunks
+		totalFrames := len(frameFiles)
+		numChunks := totalFrames / targetFrames
+
+		// Process each chunk
+		for i := 0; i < numChunks; i++ {
+			// Create chunk directory
+			chunkDir := filepath.Join(outPath, fmt.Sprintf("chunk_%05d", i))
+			if err := os.MkdirAll(chunkDir, 0755); err != nil {
+				return err
+			}
+
+			// Move frames for this chunk
+			startIdx := i * targetFrames
+			endIdx := (i + 1) * targetFrames
+			for j, frameFile := range frameFiles[startIdx:endIdx] {
+				oldPath := filepath.Join(outPath, frameFile)
+				newPath := filepath.Join(chunkDir, fmt.Sprintf("frame_%03d.jpg", j+1))
+				if err := os.Rename(oldPath, newPath); err != nil {
+					return fmt.Errorf("error moving frame %s: %v", frameFile, err)
+				}
+			}
+
+			// Save metadata for this chunk
+			metadata := types.ClipMetadata{
+				Key:         fmt.Sprintf("%s/chunk_%05d", clip.Key, i),
+				FPS:         fps,
+				FrameCount:  targetFrames,
+				Size:        []int{dims.Height, dims.Width},
+				OriginalFPS: fps,
+			}
+			if err := saveMetadata(metadata, filepath.Join(chunkDir, "metadata.json")); err != nil {
+				return err
+			}
+		}
+
+		// Handle remaining frames if they form a complete chunk
+		remainingFrames := totalFrames % targetFrames
+		if remainingFrames == targetFrames {
+			chunkDir := filepath.Join(outPath, fmt.Sprintf("chunk_%05d", numChunks))
+			if err := os.MkdirAll(chunkDir, 0755); err != nil {
+				return err
+			}
+
+			startIdx := numChunks * targetFrames
+			endIdx := startIdx + targetFrames
+			for j, frameFile := range frameFiles[startIdx:endIdx] {
+				oldPath := filepath.Join(outPath, frameFile)
+				newPath := filepath.Join(chunkDir, fmt.Sprintf("frame_%03d.jpg", j+1))
+				if err := os.Rename(oldPath, newPath); err != nil {
+					return fmt.Errorf("error moving frame %s: %v", frameFile, err)
+				}
+			}
+
+			metadata := types.ClipMetadata{
+				Key:         fmt.Sprintf("%s/chunk_%05d", clip.Key, numChunks),
+				FPS:         fps,
+				FrameCount:  targetFrames,
+				Size:        []int{dims.Height, dims.Width},
+				OriginalFPS: fps,
+			}
+			return saveMetadata(metadata, filepath.Join(chunkDir, "metadata.json"))
+		}
+
+		// Clean up any remaining frames that don't form a complete chunk
+		for _, frameFile := range frameFiles[numChunks*targetFrames:] {
+			oldPath := filepath.Join(outPath, frameFile)
+			if err := os.Remove(oldPath); err != nil {
+				return fmt.Errorf("error removing incomplete frame %s: %v", frameFile, err)
+			}
+		}
+
+		return nil
 	}
 }
 
 // ProcessClips processes multiple video clips in parallel
-func ProcessClips(clips []types.Clip, outputDir string, fps int, size string, format OutputFormat, numWorkers int) error {
+func ProcessClips(clips []types.Clip, outputDir string, fps int, size string, format OutputFormat, targetFrames int, numWorkers int) error {
 	if numWorkers <= 0 {
 		numWorkers = 4 // Default number of workers
 	}
@@ -238,7 +336,7 @@ func ProcessClips(clips []types.Clip, outputDir string, fps int, size string, fo
 		go func() {
 			defer wg.Done()
 			for clip := range jobs {
-				if err := ProcessClip(clip, outputDir, fps, size, format); err != nil {
+				if err := ProcessClip(clip, outputDir, fps, size, format, targetFrames); err != nil {
 					errors <- fmt.Errorf("error processing %s: %v", clip.Key, err)
 				}
 			}
