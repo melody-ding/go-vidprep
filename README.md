@@ -50,6 +50,25 @@ Output in NumPy array format:
 ./govidprep -tar my_videos.tar -format npy
 ```
 
+## Development
+
+### Running Tests
+
+To run the tests, you'll need:
+- Go 1.24 or later
+- ffmpeg installed on your system
+
+```bash
+# Run all tests
+go test ./...
+
+# Run tests for a specific package
+go test ./internal/processor
+go test ./internal/tar_reader
+```
+
+The tests use ffmpeg to generate small test videos on-the-fly, so no test video files are included in the repository.
+
 ## Output
 
 The tool will:
