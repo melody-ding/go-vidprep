@@ -25,6 +25,7 @@ go build -o govidprep cmd/govidprep/main.go
 - `-out string`: Directory to save extracted frames (default "output")
 - `-fps int`: Target frames per second (default 8)
 - `-size string`: Resize videos to this resolution, e.g. "256x256" (default "256x256")
+- `-format string`: Output format (jpg, npy) (default "jpg")
 - `-workers int`: Number of parallel workers (default: number of CPU cores)
 
 ### Examples
@@ -44,19 +45,26 @@ Specify output directory and number of workers:
 ./govidprep -tar my_videos.tar -out processed_frames -workers 4
 ```
 
+Output in NumPy array format:
+```bash
+./govidprep -tar my_videos.tar -format npy
+```
+
 ## Output
 
 The tool will:
 1. Extract videos from the tar archive
 2. Process each video to extract frames at the specified FPS
 3. Resize frames to the specified dimensions
-4. Save frames as numbered JPEG files in the output directory
+4. Save frames in the specified format (jpg or npy) in the output directory
 
 The output structure will be:
 ```
 output/
   video1/
-    frame_001.jpg
+    frames.npy  # For NumPy format - single file containing all frames
+    # OR
+    frame_001.jpg  # For JPEG format - individual frame files
     frame_002.jpg
     ...
   video2/
@@ -75,3 +83,4 @@ output/
 - The tool skips macOS hidden files (._*) in the tar archive
 - Processing time will be displayed after completion
 - Each video's frames are saved in a separate directory named after the video
+- For .npy format, the frames are saved as a single NumPy array with shape (frames, height, width, 3)
